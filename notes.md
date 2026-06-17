@@ -39,6 +39,10 @@ def add(a: int, b: int) -> int:
   return a + b
 
 # Node
+def breakpoint(state: State) -> State:characters
+  if len(state['input']) > 5:
+    raise NodeInterrupt(f"Received input that is longer than 5 characters: {state['input']}")
+
 def need_summarize(state: State) -> Literal["summarize_conversation", "__end__"]:
   """Return the next node to execute."""
   messages = state["messages"]
@@ -203,4 +207,110 @@ def node_1(state):
 
 def node_2(state):
     return {"foo": [state['foo'][-1] + 1]}
+```
+
+## Stream
+
+```py
+# via SDK
+async for event in graph.astream_events({"messages": [input_message]}, config, version="v2"):
+    # Get chat model tokens from a particular node
+    if event["event"] == "on_chat_model_stream" and event['metadata'].get('langgraph_node','') == node_to_stream:
+        data = event["data"]
+        print(data["chunk"].content, end="|")
+
+# via API
+async for event in client.runs.stream(thread["thread_id"], assistant_id="agent", input={"messages": [input_message]}, stream_mode="values"):
+    messages = event.data.get('messages',None)
+    if messages:
+        print(convert_to_messages(messages)[-1])
+    print('='*25)
+```
+
+## Interrupt
+
+```py
+# Interrupt
+graph = builder.compile(interrupt_before=["tools"], checkpointer=memory)
+
+# Continue
+## SDK
+for event in graph.stream(None, thread, stream_mode="values"):
+## API
+async for chunk in client.runs.stream(
+    thread["thread_id"],
+    "agent",
+    input=None,
+    stream_mode="values",
+    interrupt_before=["tools"],
+): ...
+
+# Human in the Loop
+def human_feedback(state: MessagesState):
+    pass
+graph = builder.compile(interrupt_before=["human_feedback"], checkpointer=memory)
+
+for event in graph.stream(initial_input, thread, stream_mode="values"):
+    event["messages"][-1].pretty_print()
+
+user_input = input("Tell me how you want to update the state: ")
+graph.update_state(thread, {"messages": user_input}, as_node="human_feedback")
+
+for event in graph.stream(None, thread, stream_mode="values"):
+    event["messages"][-1].pretty_print()
+```
+
+## States
+
+```py
+## SDK
+state = graph.get_state(thread)
+graph.update_state(thread,{"messages": [HumanMessage(content="No, actually multiply 3 and 3!")]})
+### Time Travel / Replay
+all_states = [s for s in graph.get_state_history(thread)]
+for event in graph.stream(None, all_states[-2].config, stream_mode="values"):
+    event['messages'][-1].pretty_print()
+### Fork
+fork_config = graph.update_state(
+    all_states[-2].config,
+    {"messages": [HumanMessage(content='Multiply 5 and 3',
+                               id=to_fork.values["messages"][0].id)]},
+)
+for event in graph.stream(None, fork_config, stream_mode="values"):
+    event['messages'][-1].pretty_print()
+
+## API
+current_state = await client.threads.get_state(thread['thread_id'])
+last_message = current_state['values']['messages'][-1]
+await client.threads.update_state(thread['thread_id'], {"messages": last_message})
+async for chunk in client.runs.stream(
+    thread["thread_id"],
+    assistant_id="agent",
+    input=None,
+    stream_mode="values",
+    interrupt_before=["assistant"],
+): ...
+### Time Travel / Replay
+states = await client.threads.get_history(thread['thread_id'])
+async for chunk in client.runs.stream(
+    thread["thread_id"],
+    assistant_id="agent",
+    input=None,
+    stream_mode="updates",
+    checkpoint_id=states[-2]['checkpoint_id']
+):
+### Fork
+forked_config = await client.threads.update_state(
+    thread["thread_id"],
+    {"messages": HumanMessage(content="Multiply 3 and 3",
+      id=to_fork['values']['messages'][0]['id'])},
+    checkpoint_id=states[-2]['checkpoint_id']
+)
+async for chunk in client.runs.stream(
+    thread["thread_id"],
+    assistant_id="agent",
+    input=None,
+    stream_mode="updates",
+    checkpoint_id=forked_config['checkpoint_id']
+): ...
 ```
