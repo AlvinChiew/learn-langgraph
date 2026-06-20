@@ -123,6 +123,9 @@ builder.add_edge(START, "node_1")
 builder.add_conditional_edges("node_1", decide_mood)
 builder.add_edge("node_2", END)
 builder.add_edge("node_3", END)
+
+# Add sub-graph
+builder.add_node("question_summarization", sub_builder.compile())
 ```
 
 ## Host
@@ -191,22 +194,52 @@ except ValidationError as e:
     print("Validation Error:", e)
 ```
 
-## Reducer
+## Parallelism - Map Reduce
 
-- When an output is branched to multiple nodes
+- Branch output to multiple nodes
 
 ```py
 from operator import add
 from typing import Annotated
+from langgraph.types import Send
 
-class State(TypedDict):
-    foo: Annotated[list[int], add]
 
-def node_1(state):
-    return {"foo": [state['foo'][0] + 1]}
+class OverallState(TypedDict):
+    topic: str
+    subjects: list[str]
+    contents: Annotated[list[int], add]
+    best_content: str
 
-def node_2(state):
-    return {"foo": [state['foo'][-1] + 1]}
+class SubjectState(TypedDict):
+    subject: str
+
+class ContentState(BaseModel):
+    content: Annotated[list[int], add]
+
+# Map
+def distribute(state: OverallState):
+    return [Send("node1", {"subject": s}) for s in state["subjects"]]
+
+def generate_content(state: SubjectState):
+    ...
+    return {"contents": [response.content]}
+
+# Reduce
+def get_best_content(state: OverallState):
+    ...
+    return {"best_content": state["contents"][response.id]}
+
+graph = StateGraph(OverallState)
+graph.add_node("generate_subjects", generate_subjects)
+graph.add_node("generate_content", generate_content)
+graph.add_node("get_best_content", get_best_content)
+
+graph.add_edge(START, "generate_subjects")
+graph.add_conditional_edges("generate_subjects", distribute, ["generate_content"])
+graph.add_edge("generate_content", "get_best_content")
+graph.add_edge("get_best_content", END)
+
+app = graph.compile()
 ```
 
 ## Stream
