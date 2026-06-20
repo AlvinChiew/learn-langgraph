@@ -347,3 +347,206 @@ async for chunk in client.runs.stream(
     checkpoint_id=forked_config['checkpoint_id']
 ): ...
 ```
+
+## Long-Term Memory
+
+```py
+import uuid
+from datetime import datetime
+from pydantic import BaseModel, Field
+from typing import Literal, Optional, TypedDict
+
+from trustcall import create_extractor
+
+from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import merge_message_runs
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
+
+import configuration
+
+model = ChatOpenAI(model="gpt-4o", temperature=0)
+
+# Procedural (Instructions) - System Prompt
+MODEL_SYSTEM_MESSAGE = "... {user_profile} ... {todo} ... {instructions} ..."
+
+# Semantic (Facts) - User profile schema
+class Profile(BaseModel):
+    """This is the profile of the user you are chatting with"""
+    name: Optional[str] = Field(description="The user's name", default=None)
+    interests: list[str] = Field(
+        description="Interests that the user has",
+        default_factory=list
+    )
+
+# Episodic (Memories) - ToDo schema
+class ToDo(BaseModel):
+    task: str = Field(description="The task to be completed.")
+    deadline: Optional[datetime] = Field(
+        description="When the task needs to be completed by (if applicable)",
+        default=None
+    )
+    status: Literal["not started", "in progress", "done", "archived"] = Field(
+        description="Current status of the task",
+        default="not started"
+    )
+
+class MemoryType(TypedDict):
+    """ Decision on what memory type to update """
+    memory_type: Literal['user', 'todo', 'instructions']
+
+
+
+def memory_assistant(state: MessagesState, config: RunnableConfig, store: BaseStore):
+    """Load memories from the store and use them to personalize the chatbot's response."""
+
+    # Get the user ID from the config
+    ...
+
+    namespace = ("profile", user_id)
+    memories = store.search(namespace)
+    user_profile = memories[0].value if memories else None
+
+    namespace = ("todo", user_id)
+    memories = store.search(namespace)
+    todo = "\n".join(f"{mem.value}" for mem in memories)
+
+    namespace = ("instructions", user_id)
+    memories = store.search(namespace)
+    instructions = memories[0].value if memories else ""
+
+    system_msg = MODEL_SYSTEM_MESSAGE.format(user_profile=user_profile, todo=todo, instructions=instructions)
+    response = model.bind_tools([MemoryType], parallel_tool_calls=False).invoke([SystemMessage(content=system_msg)]+state["messages"])
+    return {"messages": [response]}
+
+def update_profile(state: MessagesState, config: RunnableConfig, store: BaseStore):
+    """Reflect on the chat history and update the memory collection."""
+
+    # Get the user ID from the config
+    ...
+
+    namespace = ("profile", user_id)
+    existing_items = store.search(namespace)
+    tool_name = "Profile"
+    existing_memories = ([(existing_item.key, tool_name, existing_item.value)
+                          for existing_item in existing_items]
+                          if existing_items
+                          else None
+                        )
+
+    TRUSTCALL_INSTRUCTION_FORMATTED=TRUSTCALL_INSTRUCTION.format(time=datetime.now().isoformat())
+    updated_messages=list(merge_message_runs(messages=[SystemMessage(content=TRUSTCALL_INSTRUCTION_FORMATTED)] + state["messages"][:-1]))
+
+    profile_extractor = create_extractor(
+        model,
+        tools=[Profile],
+        tool_choice="Profile",
+    )
+
+    result = profile_extractor.invoke({"messages": updated_messages,
+                                         "existing": existing_memories})
+
+    for r, rmeta in zip(result["responses"], result["response_metadata"]):
+        store.put(namespace,
+                  rmeta.get("json_doc_id", str(uuid.uuid4())),
+                  r.model_dump(mode="json"),
+            )
+    tool_calls = state['messages'][-1].tool_calls
+    return {"messages": [{"role": "tool", "content": "updated profile", "tool_call_id":tool_calls[0]['id']}]}
+
+def update_todos(state: MessagesState, config: RunnableConfig, store: BaseStore):
+
+    """Reflect on the chat history and update the memory collection."""
+
+    # Get the user ID from the config
+    ...
+
+    namespace = ("todo", user_id)
+    existing_items = store.search(namespace)
+    tool_name = "ToDo"
+    existing_memories = ([(existing_item.key, tool_name, existing_item.value)
+                          for existing_item in existing_items]
+                          if existing_items
+                          else None
+                        )
+
+    TRUSTCALL_INSTRUCTION_FORMATTED=TRUSTCALL_INSTRUCTION.format(time=datetime.now().isoformat())
+    updated_messages=list(merge_message_runs(messages=[SystemMessage(content=TRUSTCALL_INSTRUCTION_FORMATTED)] + state["messages"][:-1]))
+
+    todo_extractor = create_extractor(
+        model,
+        tools=[ToDo],
+        tool_choice=tool_name,
+        enable_inserts=True
+    ).with_listeners(on_end=spy)
+
+    result = todo_extractor.invoke({"messages": updated_messages,
+                                    "existing": existing_memories})
+    for r, rmeta in zip(result["responses"], result["response_metadata"]):
+        store.put(namespace,
+                  rmeta.get("json_doc_id", str(uuid.uuid4())),
+                  r.model_dump(mode="json"),
+            )
+
+    tool_calls = state['messages'][-1].tool_calls
+    todo_update_msg = extract_tool_info(spy.called_tools, tool_name)
+    return {"messages": [{"role": "tool", "content": todo_update_msg, "tool_call_id":tool_calls[0]['id']}]}
+
+def update_instructions(state: MessagesState, config: RunnableConfig, store: BaseStore):
+    """Reflect on the chat history and update the memory collection."""
+
+    # Get the user ID from the config
+    ...
+
+    namespace = ("instructions", user_id)
+
+    existing_memory = store.get(namespace, "user_instructions")
+
+    # Format the memory in the system prompt
+    system_msg = CREATE_INSTRUCTIONS.format(current_instructions=existing_memory.value if existing_memory else None)
+    new_memory = model.invoke([SystemMessage(content=system_msg)]+state['messages'][:-1] + [HumanMessage(content="Please update the instructions based on the conversation")])
+
+    key = "user_instructions"
+    store.put(namespace, key, {"memory": new_memory.content})
+    tool_calls = state['messages'][-1].tool_calls
+    return {"messages": [{"role": "tool", "content": "updated instructions", "tool_call_id":tool_calls[0]['id']}]}
+
+def route_message(state: MessagesState, config: RunnableConfig, store: BaseStore) -> Literal[END, "update_todos", "update_instructions", "update_profile"]:
+    """Reflect on the memories and chat history to decide whether to update the memory collection."""
+    message = state['messages'][-1]
+    if len(message.tool_calls) ==0:
+        return END
+    else:
+        tool_call = message.tool_calls[0]
+        if tool_call['args']['memory_type'] == "user":
+            return "update_profile"
+        elif tool_call['args']['memory_type'] == "todo":
+            return "update_todos"
+        elif tool_call['args']['memory_type'] == "instructions":
+            return "update_instructions"
+        else:
+            raise ValueError
+
+# Create the graph + all nodes
+builder = StateGraph(MessagesState, config_schema=configuration.Configuration)
+
+# Define the flow of the memory extraction process
+builder.add_node(memory_assistant)
+builder.add_node(update_todos)
+builder.add_node(update_profile)
+builder.add_node(update_instructions)
+
+# Define the flow
+builder.add_edge(START, "memory_assistant")
+builder.add_conditional_edges("memory_assistant", route_message)
+builder.add_edge("update_todos", "memory_assistant")
+builder.add_edge("update_profile", "memory_assistant")
+builder.add_edge("update_instructions", "memory_assistant")
+
+# Compile the graph
+graph = builder.compile()
+```
