@@ -348,6 +348,76 @@ async for chunk in client.runs.stream(
 ): ...
 ```
 
+```py
+from langgraph_sdk import get_client
+from langgraph.pregel.remote import RemoteGraph
+
+client = get_client(url="http://localhost:8123")
+
+# Connect within langgraph
+remote_graph = RemoteGraph(graph_name, url=url)
+
+
+## Assistant
+### Create
+assistants = await client.assistants.create(
+    "graph_name",
+    config={"configurable": {"category": "a", "user_id": "lance",  "role": ROLE_PROMPT}}
+)
+
+### Read
+assistants = await client.assistants.search()
+
+### Update
+personal_assistant = await client.assistants.update(
+    personal_assistant["assistant_id"],
+    config={"configurable": configurations}
+)
+
+### Delete
+await client.assistants.delete(assistants[-1]["assistant_id"])
+
+
+## Thread
+### Read
+state = await client.threads.get_state(thread['thread_id'])
+states = await client.threads.get_history(thread['thread_id'])
+
+### Fork
+copied_thread = await client.threads.copy(thread['thread_id'])
+
+
+## Run
+### Create
+run = await client.runs.create(thread["thread_id"], graph_name, input={"messages": [HumanMessage(content=user_input)]}, config=config)
+
+### Read
+await client.runs.join(thread["thread_id"], run["run_id"])  # Wait until run completes
+print(await client.runs.get(thread["thread_id"], run["run_id"]))
+
+### Stream
+async for chunk in client.runs.stream(thread["thread_id"],
+                                      graph_name,
+                                      input={"messages": [HumanMessage(content=user_input)]},
+                                      config=config,
+                                      stream_mode="messages-tuple"):
+
+    if chunk.event == "messages":
+        print("".join(data_item['content'] for data_item in chunk.data if 'content' in data_item), end="", flush=True)
+
+
+## Store
+### Read
+await client.store.search_items(("todo", "general", "Test"), limit=5, offset=0`)
+
+### Create
+await client.store.put_item(("testing", "Test"),key=str(uuid4()),value={"todo": "Test SDK put_item"})
+
+### Delete
+await client.store.delete_item(("testing", "Test"), key='3de441ba-8c79-4beb-8f52-00e4dcba68d4')
+
+```
+
 ## Long-Term Memory
 
 ```py
@@ -549,4 +619,42 @@ builder.add_edge("update_instructions", "memory_assistant")
 
 # Compile the graph
 graph = builder.compile()
+```
+
+## Double Texting
+
+```py
+await client.runs.create(
+        thread_id,
+        graph_name,
+        input={"messages": [HumanMessage(content=input)]},
+        config=config,
+        multitask_strategy=...,
+            # "reject"      - reject latter tasks
+            # "enqueue"     - queue and group latter tasks
+            # "interrupt"   - abort but keep checkpoint from former task
+            # "rollback"    - abort and delete former task
+    )
+
+# Verify
+state = await client.threads.get_state(thread["thread_id"])
+for m in convert_to_messages(state["values"]["messages"]):
+    m.pretty_print()
+```
+
+## Deployment
+
+```sh
+pip install -U langgraph-cli
+
+langgraph build -t graph-image
+
+docker run \
+    --env-file .env \
+    -p 8123:8000 \
+    -e REDIS_URI="foo" \
+    -e POSTGRES_URI="bar" \
+    -e LANGSMITH_API_KEY="baz" \
+    -e OPENAI_API_KEY="baz" \
+    graph-image
 ```
